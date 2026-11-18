@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Production / Build Output
+dist/
+build/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment & Local Secrets
+.env
+.env.*
+!.env.example
+
+# Temporary files & caches
+.turbo/
+.cache/
+coverage/
+*.tsbuildinfo
+
+# OS / Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# SQLite databases & journals
+*.db
+*.db-wal
+*.db-shm
