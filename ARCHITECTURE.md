@@ -19,8 +19,11 @@ Build a local Windows service that accepts a task, selects a capable execution a
 ```mermaid
 flowchart LR
   U[Local user / future dashboard] --> API[Fastify API]
+  CH[Optional ChatGPT app / MCP control surface] --> API
   API --> S[Task service + policy engine]
   S --> DB[(SQLite)]
+  S --> PM[Shared project memory + handoff service]
+  PM --> DB
   S --> Q[SQLite-backed dispatcher]
   Q --> W[Execution supervisor]
   W --> WT[Git worktree manager]
@@ -44,7 +47,14 @@ A modular monolith is sufficient initially: Fastify routes, application services
 - **Worktree manager:** create a task branch from a selected commit, check repository identity, collect diff/status, and clean up only after retention permits.
 - **Adapter registry:** identifies installed/authenticated agents and supports input/output modes, resumability, cancellation, file-edit behavior, and permission controls.
 - **Review service:** separate review attempt on a read-only snapshot; records findings without changing implementation worktree.
+- **Project memory and handoff service:** shared, project-scoped records for documentation, durable decisions, task context, execution reports, and cross-agent messages. Expose a stable API to the task service and authorized adapters; keep access controls, provenance, and revision history independent of any provider's conversation memory.
 - **Audit/event store:** append-only task events and structured runs; redact secrets before persistence.
+
+### ChatGPT as an optional control surface
+
+ChatGPT is a user-facing external interface, not the orchestration engine. A future ChatGPT app built with the Apps SDK and MCP could expose narrow actions such as create task, inspect status, read project memory, request cancellation, and submit an approval decision. The app would call the same authenticated local orchestration API; scheduling, routing, retries, execution, isolation, and durable state stay in this service. Do not delegate shell access or repository credentials to the ChatGPT-facing MCP server.
+
+This path requires a network-reachable HTTPS MCP endpoint or a supported secure MCP tunnel; ChatGPT cannot connect directly to a localhost-only endpoint. Full custom MCP write/modify support is plan and workspace dependent: current OpenAI documentation describes full MCP for Business and Enterprise/Edu, while Pro has read/fetch limits; availability can change. Custom MCP apps are web-only in the current docs, so they do not satisfy mobile access by themselves. ChatGPT may prompt for confirmation for actions, but that product prompt does not replace this service's mandatory approval check for merge. ChatGPT plan access is not an OpenAI API key or a promise of API credits. Keep the feature optional and do not require paid ChatGPT tiers or APIs for the core product. See [OpenAI's ChatGPT custom MCP guide](https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt), [Apps SDK overview](https://help.openai.com/en/articles/12515353-building-with-the-apps-sdk), and [ChatGPT API-credit plan guidance](https://help.openai.com/en/articles/20001626-api-credits-benefit-for-eligible-chatgpt-subscriptions).
 
 ## Agent adapter interface
 
@@ -71,8 +81,14 @@ type AgentCapabilities = {
 
 type AgentRunRequest = {
   taskId: string; worktreePath: string; prompt: string; model?: string;
-  timeoutMs: number; maxTurns?: number; permissionProfile: PermissionProfile;
+  timeoutMs: number; maxTurns?: number; taskBudget?: BudgetLimits;
+  permissionProfile: PermissionProfile;
   environment: Record<string, string>;
+};
+
+type BudgetLimits = {
+  maxWallTimeMs: number; maxRetries: number; maxInputTokens?: number;
+  maxOutputTokens?: number; maxEstimatedCost?: number;
 };
 
 type AgentEvent =
@@ -112,6 +128,14 @@ Each transition writes task state and an event transactionally. Define idempoten
 
 Task record: ID, prompt, repository/root identity, base commit, priority, routing constraints, state, timestamps, attempt/retry counts, adapter/model, worktree/branch, run IDs, review outcome, approval identity/timestamps, artifacts, sanitized failure details. Keep secrets out of task payloads and logs.
 
+The dispatcher must enforce per-agent concurrency ceilings, per-task budget/time/retry limits, and optional project-wide budgets. Persist provider-reported usage and label locally computed spend as estimates. Stop or request a human decision when a hard budget is reached; never auto-retry around it. Record budget and usage per attempt, agent, and task.
+
+## Shared project memory and handoffs
+
+Project memory is an orchestrator-owned, provider-neutral record set, not a prompt dump or a provider's private session history. Support typed items for project docs, decisions (including rationale and superseded state), task context, execution reports, and cross-agent handoff messages. Every item has project/task IDs, author/agent, source run, timestamps, visibility, and revision metadata. Provide append-only or versioned writes, search by project/task, bounded context retrieval, and explicit size/retention rules. Secrets should be excluded or encrypted with a separate policy; agents receive only the scoped items needed for their task.
+
+Handoff flow: an agent writes a structured report (goal, completed work, changed paths, checks, unresolved questions, risks, and next steps) to the memory service; the next agent receives a task-scoped summary and source references, then acknowledges/updates the handoff. Never rely on direct agent-to-agent private channels. Store messages and delivery/acknowledgment events for audit. SQLite is the initial backing store; the interface should permit later indexing without adding a separate service now.
+
 ## Routing and review
 
 Filter adapters by availability, task class, required tools, requested provider/model, permission compatibility, budget ceiling, and local/cloud policy. Score the rest by task fit, observed success/latency, queue depth, cost class, and user preference. Explain the choice and allow override. Start with deterministic rules, not opaque model routing.
@@ -128,7 +152,8 @@ Provider remote-control features (for example Antigravity) are separate product 
 
 - CLI flags, JSONL schemas, auth, model availability, rate limits, and prices change. Pin/test adapter versions and revalidate upgrades.
 - A CLI approval-bypass option may create broad authority; isolate at OS/container level instead of trusting prompts as a boundary.
-- Windows-native process containment varies. Validate Windows Job Objects/AppContainer/WSL/container options before claiming strong isolation. Default to restricted identity and per-task directories, without host-wide credentials.
+- Git worktrees and provider permission flags are workflow/tool controls, not security boundaries. Do not enable automated code modification until OS-level isolation is validated with escape and filesystem-access tests.
+- Windows-native process containment varies. Validate a suitable Windows Sandbox/VM/container or restricted identity plus filesystem ACL and process controls; test that workers cannot read sibling projects, user profile secrets, or write outside the task area. A Job Object limits process lifetime/resources but is not filesystem isolation by itself.
 - Concurrent worktrees share Git object storage and may contend for CPU/RAM/disk. Cap concurrency and clean up safely.
 - Local models avoid per-token hosted charges but require hardware, disk, power, and setup. Large coding models may exceed VRAM/RAM.
 - Subscription access does not imply API access or API credits. Confirm entitlement and billing before enabling automated runs.
